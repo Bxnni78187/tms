@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+
+# wrapper script for tmux sessionizer
+# This script will do a fzf of all projects in ~/projects
+# and call tmux-sessionizer with the selected project
+# Usage: tms
+# Options: -h for help, -l to list projects, -a to add a project, -r to remove a project
+# Requires: jq, fzf, tmux-sessionizer
+
+PROJECTS_FILE=~/projects.json
+SESSIONIZER_SCRIPT=~/.local/bin/tmux-sessionizer
+
+is_project() {
+  local name="$1"
+  if [ ! -f ~/projects.json ]; then
+    return 1
+  fi
+  if jq -e --arg name "$name" '.[$name]' ~/projects.json >/dev/null; then
+    return 0
+  else
+    return 1
+    
+  fi
+}
+open_project_fzf() {
+  selected_name="$(jq -r 'keys[]' ~/projects.json | fzf --prompt='Select project to edit> ' --height=40% --border --reverse)"
+  [[ -z "$selected_name" ]] && exit 0  # user cancelled
+  echo "$selected_name"
+}
+
+while [[ "$1" =~ ^- && ! "$1" == "--" ]]; do
+  case $1 in
+  -h | --help)
+    echo "Usage: tms [options] [arguments]"
+    echo "Options:"
+    echo "  -h, --help                    Show this help message"
+    echo "  -l, --list                    List all projects"
+    echo "  -a, --add <name> <path>       Add a project"
+    echo "  -r, --remove <name>           Remove a project"
+    echo "If no options are provided, a fzf menu will be shown to select a project."
+    echo "Arguments:"
+    echo "  <name>                        Name of the project to open"
+    echo "  <path>                        Path of the project to add"
+    exit 0
+    ;;
+  -l | --list)
+    if [ -f ~/projects.json ]; then
+      if ! command -v batcat &>/dev/null ; then
+        echo "Install 'batcat' for a better listing experience."
+        jq -r 'to_entries[] | "\(.key): \(.value)"' ~/projects.json
+      else
+        # trim bat output to look like jq output
+        jq -r 'to_entries[] | "\(.key): \(.value)"' ~/projects.json \
+          | batcat --language=yaml --paging=never --style=plain
+
+      fi
+    else
+      echo "No projects file found."
+    fi
+    exit 0
+    ;;
+  -a | --add)
+    name="$2"
+    path="$3"
+    if [ -z "$name" ] || [ -z "$path" ]; then
+      echo "Name and path are required."
+      exit 1
+    fi
+    if [[ "$name" =~ [/:] ]]; then
+      echo "Name cannot contain '/' or ':'."
+      exit 1
+    fi
+    if [ ! -d "$path" ]; then
+      echo "Path does not exist or is not a directory."
+      exit 1
+    fi
+    if [ ! -f ~/projects.json ]; then
+      echo "{}" >~/projects.json
+    fi
+    if jq -e --arg name "$name" '.[$name]' ~/projects.json >/dev/null; then
+      echo "Project with name '$name' already exists."
+      exit 1
+    fi
+    tmpfile=$(mktemp)
+    jq --arg name "$name" --arg path "$path" '. + {($name): $path}' ~/projects.json >"$tmpfile" && mv "$tmpfile" ~/projects.json
+    echo "Project '$name' added."
+    exit 0
+    ;;
+  -r | --remove)
+    name="$2"
+    if [ -z "$name" ]; then
+      echo "Name cannot be empty."
+      exit 1
+    fi
+    if [ ! -f ~/projects.json ]; then
+      echo "No projects file found."
+      exit 1
+    fi
+    if ! jq -e --arg name "$name" '.[$name]' ~/projects.json >/dev/null; then
+      echo "Project with name '$name' does not exist."
+      exit 1
+    fi
+    tmpfile=$(mktemp)
+    jq --arg name "$name" 'del(.[$name])' ~/projects.json >"$tmpfile" && mv "$tmpfile" ~/projects.json
+    echo "Project '$name' removed."
+    exit 0
+    ;;
+  -e | --edit)
+    name="$2"
+    if [ ! -f ~/projects.json ]; then
+      echo "No projects file found."
+      exit 1
+    fi
+    if ! jq -e --arg name "$name" '.[$name]' ~/projects.json >/dev/null; then
+      echo "Project with name '$name' does not exist."
+      exit 1
+    fi
+    if [ -z "$name" ]; then
+      # Open fzf to select project to edit path or name
+      old_name="$(open_project_fzf)"
+      if [ -z "$old_name" ]; then
+        echo "No project selected."
+        exit 1
+      fi
+      # prompt for new name or path
+      
+      read -p "Enter new name (leave empty to keep '$old_name'): " name
+      read -p "Enter new path (leave empty to keep current path): " path
+      if [ -z "$name" ]; then
+        name="$old_name"
+      fi
+      if [ -z "$path" ]; then
+        path="$(jq -r --arg name "$old_name" '.[$name]' ~/projects.json)"
+      fi
+    else
+      path="$3"
+      if [ -z "$path" ]; then
+        read -p "Enter new path (leave empty to keep current path): " path
+        if [ -z "$path" ]; then
+          echo "Path cannot be empty."
+          exit 1
+        fi
+      fi
+    fi
+    tmpfile=$(mktemp)
+    jq --arg old_name "$old_name" --arg name "$name" --arg path "$path" 'del(.[$old_name]) | . + {($name): $path}' ~/projects.json >"$tmpfile" && mv "$tmpfile" ~/projects.json
+    echo "Project '$old_name' updated to '$name'."
+
+    exit 0
+    ;;
+  *) 
+    echo "Unknown option: $1"
+    echo "Use -h for help."
+    exit 1
+    ;;
+
+  *)
+  esac
+  shift
+done
+if [ "$1" == "--" ]; then shift; fi
+while [ ! -z "$1" ]; do
+  echo "Opening project by name: $1"
+  if is_project "$1"; then
+    selected_name="$1"
+    echo "Opening project '$selected_name'..."
+    selected_path="$(jq -r --arg name "$selected_name" '.[$name]' ~/projects.json)"
+    "$SESSIONIZER_SCRIPT" "$selected_path" -n "$selected_name"
+    exit 0
+  else
+    echo "Project '$1' does not exist."
+    echo "Use -h for help."
+    exit 1
+  fi
+  shift
+done
+
+
+
+if [ ! -f "$PROJECTS_FILE" ]; then
+  echo "Projects file $PROJECTS_DIR does not exist."
+  exit 1
+fi
+if [ ! -x "$SESSIONIZER_SCRIPT" ]; then
+  echo "Sessionizer script $SESSIONIZER_SCRIPT is not executable."
+  exit 1
+fi
+
+if ! command -v jq &>/dev/null; then
+    echo "Error: jq not installed."
+
+    exit 1
+fi
+
+if ! command -v fzf &>/dev/null; then
+    echo "Error: fzf not installed."
+    exit 1
+fi
+
+selected_name="$(jq -r 'keys[]' "$PROJECTS_FILE" | fzf --prompt='Select project> ' --height=40% --border --reverse)"
+[[ -z "$selected_name" ]] && exit 0  # user cancelled
+
+selected_path="$(jq -r --arg name "$selected_name" '.[$name]' "$PROJECTS_FILE")"
+
+# --- expand ~ manually ---
+
+if [[ "$selected_path" =~ ^~ ]]; then
+    selected_path="${HOME}${selected_path:1}"
+fi
+
+if [[ ! -d "$selected_path" ]]; then
+    echo "Error: directory does not exist: $selected_path"
+    exit 1
+fi
+
+# --- run the sessionizer ---
+"$SESSIONIZER_SCRIPT" "$selected_path" -n "$selected_name"
